@@ -153,6 +153,15 @@ class TimeSeriesDataset(BaseTimeSeriesDataset):
         self.indptr = indptr
         self.n_groups = self.indptr.size - 1
         sizes = np.diff(indptr)
+
+        # Pre-calculate constants to avoid repeated computations
+        self.n_cols = len(temporal_cols)
+        self.max_size_value = sizes.max().item()
+        # Create a reusable buffer - 100 is a reasonable size for batch recycling
+        self.buffer = torch.zeros(
+            size=(100, self.n_cols, self.max_size_value), dtype=torch.float32
+        )
+
         super().__init__(
             temporal_cols=temporal_cols,
             max_size=sizes.max().item(),
@@ -164,12 +173,18 @@ class TimeSeriesDataset(BaseTimeSeriesDataset):
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
-            # Parse temporal data and pad its left
-            temporal = torch.zeros(
-                size=(len(self.temporal_cols), self.max_size), dtype=torch.float32
-            )
-            ts = self.temporal[self.indptr[idx] : self.indptr[idx + 1], :]
-            temporal[: len(self.temporal_cols), -len(ts) :] = ts.permute(1, 0)
+            # Reuse pre-allocated tensor from buffer instead of creating new
+            buffer_idx = idx % 100
+            temporal = self.buffer[buffer_idx]
+            temporal.zero_()  # Clear previous contents
+
+            # Parse temporal data and position it
+            start, end = self.indptr[idx], self.indptr[idx + 1]
+            ts = self.temporal[start:end, :]
+            ts_len = end - start
+
+            # Assign to buffer (using t() instead of permute for efficiency)
+            temporal[:, -ts_len:] = ts.t()
 
             # Add static data if available
             static = None if self.static is None else self.static[idx, :]
@@ -181,7 +196,6 @@ class TimeSeriesDataset(BaseTimeSeriesDataset):
                 static_cols=self.static_cols,
                 y_idx=self.y_idx,
             )
-
             return item
         raise ValueError(f"idx must be int, got {type(idx)}")
 
