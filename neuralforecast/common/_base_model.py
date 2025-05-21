@@ -667,32 +667,38 @@ class BaseModel(pl.LightningModule):
             windows = temporal.unfold(
                 dimension=-1, size=window_size, step=self.step_size
             )
+            batch_size, channels, windows_per_serie, window_size = windows.shape
 
+            # Combine reshape operations
             if self.MULTIVARIATE:
-                # [n_series, C, Ws, L + h] -> [Ws, L + h, C, n_series]
-                windows = windows.permute(2, 3, 1, 0)
+                windows = windows.permute(2, 3, 1, 0)  # [Ws, L+h, C, n_series]
             else:
-                # [n_series, C, Ws, L + h] -> [Ws * n_series, L + h, C, 1]
-                windows_per_serie = windows.shape[2]
-                windows = windows.permute(0, 2, 3, 1)
-                windows = windows.flatten(0, 1)
-                windows = windows.unsqueeze(-1)
+                # Single operation combines permute, flatten, and unsqueeze
+                windows = windows.permute(0, 2, 3, 1).reshape(
+                    -1, window_size, channels, 1
+                )
 
             # Sample and Available conditions
             available_idx = temporal_cols.get_loc("available_mask")
-            available_condition = windows[:, : self.input_size, available_idx]
-            available_condition = torch.sum(
-                available_condition, axis=(1, -1)
-            )  # Sum over time & series dimension
-            final_condition = available_condition > 0
+            available_mask = windows[
+                :, :, available_idx
+            ]  # Get all availability data at once
+
+            # Compute conditions with fewer operations
+            insample_available = (
+                available_mask[:, : self.input_size].sum(dim=(1, -1)) > 0
+            )
 
             if self.h > 0:
-                sample_condition = windows[:, self.input_size :, available_idx]
-                sample_condition = torch.sum(
-                    sample_condition, axis=(1, -1)
-                )  # Sum over time & series dimension
-                final_condition = (sample_condition > 0) & (available_condition > 0)
+                # Single tensor operation for output sample condition
+                outsample_available = (
+                    available_mask[:, self.input_size :].sum(dim=(1, -1)) > 0
+                )
+                final_condition = insample_available & outsample_available
+            else:
+                final_condition = insample_available
 
+            # Apply filter once
             windows = windows[final_condition]
 
             # Parse Static data to match windows
